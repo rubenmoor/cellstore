@@ -1,7 +1,10 @@
 {-# LANGUAGE GADTs                 #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RecordWildCards       #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE TypeFamilies          #-}
+{-# LANGUAGE TypeFamilyDependencies #-}
+-- {-# LANGUAGE AllowAmbiguousTypes #-}
 
 module Lib
     ( someFunc
@@ -9,6 +12,7 @@ module Lib
 
 import qualified Data.Bson              as Bson
 import           Data.Map               (Map)
+import           Data.Proxy             (Proxy (Proxy))
 import           Data.Text              (Text)
 import qualified Data.Text              as Text
 
@@ -46,10 +50,10 @@ data MongoBackend = MongoBackend
   , mbAccessMode :: AccessMode
   }
 
-class CellStoreBackend a where
-  type DbValueType a :: *
+class CellStoreBackend backend where
+  type DbValueType backend = c | c -> backend
   put :: MonadIO m
-      => a -> Map Dimension DimValue -> DbValueType a -> m ()
+      => backend -> Map Dimension DimValue -> DbValueType backend -> m ()
 
 instance CellStoreBackend MongoBackend where
   type DbValueType MongoBackend = Bson.Document
@@ -62,11 +66,11 @@ data CellStore a where
 
 class CellStoreBackend backend => Cell backend a where
     mkValue :: a -> DbValueType backend
-    dimensions :: a -> Map Dimension DimValue
+    dimensions :: Proxy backend -> a -> Map Dimension DimValue
 
 putCell :: (MonadIO m, Cell backend a)
         => CellStore backend -> a -> m ()
-putCell (CellStore db) c = put db (dimensions c) (mkValue c)
+putCell (CellStore db) c = put db (dimensions (Proxy :: backend) c) (mkValue c)
 
 -- cellstore types
 
