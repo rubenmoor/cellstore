@@ -1,17 +1,22 @@
-{-# LANGUAGE GADTs                 #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE RecordWildCards       #-}
-{-# LANGUAGE ScopedTypeVariables   #-}
-{-# LANGUAGE TypeFamilies          #-}
-{-# LANGUAGE TypeFamilyDependencies #-}
--- {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs            #-}
+{-# LANGUAGE RecordWildCards  #-}
+{-# LANGUAGE TypeFamilies     #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedLists #-}
+{-# LANGUAGE InstanceSigs #-}
 
 module Lib
     ( someFunc
     ) where
 
+import Data.Monoid ((<>))
+import Control.Monad.Except (MonadError, throwError)
+
 import qualified Data.Bson              as Bson
+import Data.Bson (Field ((:=)), val)
 import           Data.Map               (Map)
+import qualified Data.Map as Map
 import           Data.Proxy             (Proxy (Proxy))
 import           Data.Text              (Text)
 import qualified Data.Text              as Text
@@ -21,7 +26,7 @@ import           Control.Monad.IO.Class (MonadIO, liftIO)
 -- mongo backend
 
 import qualified Database.MongoDB       as Mongo
-import           Database.MongoDB.Query (AccessMode, master)
+import qualified Database.MongoDB.Query as Mongo
 
 someFunc :: IO ()
 someFunc = putStrLn "someFunc"
@@ -30,49 +35,95 @@ someFunc = putStrLn "someFunc"
 
 type DbHost = Text
 type DbName = Text
+type DbCollection = Text
 
 mkCellStoreMongoDb :: MonadIO m
                   => DbName
+                  -> DbCollection
                   -> DbHost
-                  -> AccessMode
+                  -> Mongo.AccessMode
                   -> m (CellStore MongoBackend)
-mkCellStoreMongoDb name host accessMode = do
+mkCellStoreMongoDb name collection host accessMode = do
     pipe <- liftIO $ Mongo.connect $ Mongo.host (Text.unpack host)
     pure $ CellStore MongoBackend
       { mbPipe       = pipe
       , mbDbName     = name
+      , mbDbCollection = collection
       , mbAccessMode = accessMode
       }
 
 data MongoBackend = MongoBackend
   { mbPipe       :: Mongo.Pipe
   , mbDbName     :: DbName
-  , mbAccessMode :: AccessMode
+  , mbDbCollection :: DbCollection
+  , mbAccessMode :: Mongo.AccessMode
   }
 
-class CellStoreBackend backend where
-  type DbValueType backend = c | c -> backend
-  put :: MonadIO m
-      => backend -> Map Dimension DimValue -> DbValueType backend -> m ()
+class CellStoreBackend b where
+  type DbCellType b :: *
+  type DbValueType b :: *
+  save :: MonadIO m => b -> Map Dimension DimValue -> DbValueType b -> m ()
+  load :: (MonadIO m, MonadError Text m)
+       => b -> Map Dimension DimValue -> m (DbValueType b)
 
 instance CellStoreBackend MongoBackend where
-  type DbValueType MongoBackend = Bson.Document
-  put MongoBackend{..} dims value = undefined
+  type DbCellType MongoBackend = Bson.Document
+  type DbValueType MongoBackend = Bson.Value
+  save MongoBackend{..} dims value =
+      () <$ Mongo.access mbPipe mbAccessMode mbDbName
+          (Mongo.insert mbDbCollection $ ("value" := value) : dimsToDoc dims)
+  load MongoBackend{..} dims = do
+      doc <- Mongo.access mbPipe mbAccessMode mbDbName $
+          Mongo.findOne (Mongo.select (dimsToDoc dims) mbDbCollection)
+      maybe (throwError "Not found") (Mongo.look "value") doc
+
+dimsToDoc :: Map Dimension DimValue -> Bson.Document
+dimsToDoc dims = foldl acc [] (Map.toList dims)
+  where
+    acc ds (dim, dimval) = ("dim" <> dim := val dimval) : ds
 
 -- cellstore interface
 
 data CellStore a where
   CellStore :: CellStoreBackend a => a -> CellStore a
 
-class CellStoreBackend backend => Cell backend a where
-    mkValue :: a -> DbValueType backend
-    dimensions :: Proxy backend -> a -> Map Dimension DimValue
+class DataPointClass a where
+    dimensions :: a -> Map Dimension DimValue
 
-putCell :: (MonadIO m, Cell backend a)
-        => CellStore backend -> a -> m ()
-putCell (CellStore db) c = put db (dimensions (Proxy :: backend) c) (mkValue c)
+class (CellStoreBackend (Backend a), DataPointClass (DataPoint a)) => Cell a where
+    type DataPoint a :: *
+    type Backend a :: *
+    mkValue :: a -> DbValueType (Backend a)
+
+saveCell :: (MonadIO m, Cell a)
+         => CellStore (Backend a) -> a -> DataPoint a -> (Dimension, DimValue) -> m ()
+saveCell (CellStore backend) c d (specificDim, specificDimVal) =
+    save backend (Map.insert specificDim specificDimVal $ dimensions d) (mkValue c)
+
+loadCell :: (MonadIO m, MonadError Text m, Cell a)
+         => CellStore (Backend a)
+         -> a
+         -> DataPoint a
+         -> (Dimension, DimValue)
+         -> m (DbValueType (Backend a))
+loadCell (CellStore backend) c d (specificDim, specificDimVal) =
+  load backend (Map.insert specificDim specificDimVal $ dimensions d)
 
 -- cellstore types
 
 type Dimension = Text
 type DimValue = Text
+
+-- instances
+
+data ItemDataPoint
+
+instance DataPointClass ItemDataPoint where
+    dimensions _ = [("BASE", "BAS")]
+
+newtype Item = Item { unItem :: Double }
+
+instance Cell Item where
+    type Backend Item = MongoBackend
+    type DataPoint Item = ItemDataPoint
+    mkValue (Item d) = val d
