@@ -1,4 +1,6 @@
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DataKinds #-}
 module Main where
 
 import qualified Database.MongoDB       as Mongo

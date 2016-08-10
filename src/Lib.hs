@@ -9,15 +9,17 @@
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Lib where
 
+import Control.Compose (Flip)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 import Data.Monoid ((<>))
 import Control.Monad.Except (MonadError, throwError)
 import Data.Kind (Type)
-import Data.Type.List (Map, Find)
+import Data.Type.List (Difference)
 
 import qualified Data.Bson              as Bson
 import Data.Bson (Field ((:=)), val)
@@ -38,6 +40,9 @@ type Model = Item   $|$ Aspect "Foo" '["bar"] |$ Aspect "Cus" '["eur", "usd"] |$
          &&| Double $|$ Aspect "Foo" '["bar", "baz"]
          &&| Int    $|$ Aspect "Foo" '["boz"]
 
+type SimpleModel = Integer $|$ Aspect "foo" "bar" |$ Aspect "egon" "hugo"
+               &&| Double  $|$ Aspect "foo" "baz"
+
 -- there is no query to get cells that have different aspects,
 --   i.e. queries run along dimensional values for a given set of dimensions
 -- a data point model with cells that differ by the absence of one aspect
@@ -48,27 +53,77 @@ type Model = Item   $|$ Aspect "Foo" '["bar"] |$ Aspect "Cus" '["eur", "usd"] |$
 --    ideally
 -- the data point null (no aspects) currently cannot be used
 
+-- list query: horizontal query results in list
+--             vertical queries result in tuples of (Maybe a)
+-- singleton query: always result in (Maybe a)
+
 data (&&|) a b
+infixr 1 &&|
 
 data ($|$) a b
+infixr 2 $|$
 
 data (|$) a b
+infixr 3 |$
 
 data Aspect a b
 
+-- type-level errors
+
+data MalformedModel
+data MalformedQuery
+data QueryNoMatch
+
 -- type function
 
-class ClsCellType m where
-    type CellType m q :: Type
+-- | given a database model and a singleton query, return the query result type
+--
+-- singleton query example
+-- > type Query = Aspect "Foo" "bar" |$ Aspect "Cus" "eur"
+--
 
-instance ClsCellType (a $|$ b) where
-    type CellType (a $|$ b) q = Map (\x -> Find x b) (RolloutQuery q)
-      a
-      [a]
+type family CellTypeSingle (model :: Type) (query :: Type) :: Type where
+    CellTypeSingle m q = CellTypeSingleUnwrap (CellTypeSingle' m q)
 
-type family RolloutQuery q :: [Type]
-type instance RolloutQuery (Aspect d (v ': vs)) = Aspect d v ': RolloutQuery (Aspect d vs)
-type instance RolloutQuery (Aspect _ '[])       = '[]
+type family CellTypeSingleUnwrap (a :: Maybe Type) :: Type where
+    CellTypeSingleUnwrap ('Just a) = a
+    CellTypeSingleUnwrap 'Nothing  = QueryNoMatch
+
+type family CellTypeSingle' (model :: Type) (query :: Type) :: Maybe Type where
+    CellTypeSingle' (v $|$ as) q =
+        IfThenElse (Null (Difference (OpList as) (OpList q))) ('Just v) 'Nothing
+    CellTypeSingle' c q = FindJust (MapCellTypeSingle' q (OpList c))
+
+-- | turn aspects connected with '|$' and cells connected with '&&|' into a list
+-- of aspects or cells, respectively
+type family OpList aspects :: [Type] where
+    OpList (op x xs) = x ': OpList xs
+    OpList x         = '[x]
+
+type family Null ls :: Bool where
+    Null '[] = 'True
+    Null a   = 'False
+
+type family IfThenElse (cond :: Bool) a b where
+    IfThenElse 'True  x y = x
+    IfThenElse 'False x y = y
+
+type family FindJust ls :: Maybe Type where
+    FindJust '[] = 'Nothing
+    FindJust ('Just a  ': _)  = 'Just a
+    FindJust ('Nothing ': xs) = FindJust xs
+
+type family MapCellTypeSingle' (query :: Type) (cells :: [Type]) :: [Maybe Type] where
+    MapCellTypeSingle' q (c ': cs) = CellTypeSingle' c q ': MapCellTypeSingle' q cs
+    MapCellTypeSingle' _ '[]       = '[]
+
+-- | given a database model and a list query, return the query result type
+-- type family   CellTypeList :: Type -> Type -> Type
+-- type instance CellTypeList (v $|$ a) q = Map (CellTypeSingle (v $|$ a)) (RolloutQuery q)
+
+type family RolloutQuery aspect :: [Type] where
+    RolloutQuery (Aspect d (v ': vs)) = Aspect d v : RolloutQuery (Aspect d vs)
+    RolloutQuery (Aspect _ '[])       = '[]
 
 -- Query
 
@@ -76,9 +131,13 @@ type Any = '[]
 
 -- interface
 
-save' :: MonadIO m => Proxy m -> Proxy q -> CellType m q -> m ()
+save' :: MonadIO m => Proxy model -> Proxy q -> CellTypeSingle model q -> m ()
 save' = undefined
 
+test :: IO ()
+test = save' (Proxy :: Proxy SimpleModel)
+             (Proxy :: Proxy (Aspect "foo" "baz" |$ Aspect "foo" "bar"))
+             3
 -- cellstore mongodb backend
 
 type DbHost = Text
@@ -108,8 +167,8 @@ data MongoBackend = MongoBackend
   }
 
 class CellStoreBackend b where
-  type DbCellType b :: *
-  type DbValueType b :: *
+  type DbCellType b :: Type
+  type DbValueType b :: Type
   save :: MonadIO m => b -> Map.Map Dimension DimValue -> DbValueType b -> m ()
   load :: (MonadIO m, MonadError Text m)
        => b -> Map.Map Dimension DimValue -> m (DbValueType b)
@@ -125,7 +184,7 @@ instance CellStoreBackend MongoBackend where
           Mongo.findOne (Mongo.select (dimsToDoc dims) mbDbCollection)
       maybe (throwError "Not found") (Mongo.look "value") doc
 
-dimsToDoc :: Map Dimension DimValue -> Bson.Document
+dimsToDoc :: Map.Map Dimension DimValue -> Bson.Document
 dimsToDoc dims = foldl acc [] (Map.toList dims)
   where
     acc ds (dim, dimval) = ("dim" <> dim := val dimval) : ds
@@ -136,8 +195,8 @@ data CellStore a where
   CellStore :: CellStoreBackend a => a -> CellStore a
 
 class (CellStoreBackend (Backend a), DataPointClass (DataPoint a)) => Cell a where
-    type DataPoint a :: *
-    type Backend a :: *
+    type DataPoint a :: Type
+    type Backend a :: Type
     mkValue :: a -> DbValueType (Backend a)
 
 class DataPointClass a where
