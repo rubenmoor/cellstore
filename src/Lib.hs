@@ -18,7 +18,7 @@ import GHC.TypeLits (KnownSymbol, symbolVal)
 import Data.Monoid ((<>))
 import Control.Monad.Except (MonadError, throwError)
 import Data.Kind (Type)
-import Data.Type.List (Difference, Map)
+import Data.Type.List (Find, Remove)
 
 import qualified Data.Bson              as Bson
 import Data.Bson (Field ((:=)), val)
@@ -38,10 +38,6 @@ import qualified Database.MongoDB       as Mongo
 type Model = Item   $|$ Aspect "Foo" '["bar"] |$ Aspect "Cus" '["eur", "usd"] |$ Aspect "x" '["y"]
          &&| Double $|$ Aspect "Foo" '["bar", "baz"]
          &&| Int    $|$ Aspect "Foo" '["boz"]
-
-type SimpleModel = Integer $|$ Aspect "foo" '["bor"] |$ Aspect "egon" '["hugo"] |$ Nil
-               &&| Double  $|$ Aspect "foo" '["baz", "beez"] |$ Aspect "egon" '["balders"] |$ Nil
-               &&| Nil
 
 -- there is no query to get cells that have different aspects,
 --   i.e. queries run along dimensional values for a given set of dimensions
@@ -73,6 +69,7 @@ data Aspect a b
 
 data MalformedModel
 data QueryNoMatch
+data QueryTypeMismatch a b
 
 data Match a
   = NoMatch
@@ -86,24 +83,52 @@ data Match a
 -- singleton query example
 -- > type Query = Aspect "Foo" "bar" |$ Aspect "Cus" "eur"
 --
-
 type family CellTypeSingle (model :: Type) (query :: Type) :: Type where
-    CellTypeSingle m q = MatchUnwrap (CellTypeMatch m q)
+    CellTypeSingle m q = MatchUnwrap (CellTypeMatch m (AspectList q))
+
+-- | given a database model and a list query, return the query result type
+type family CellTypeList (model :: Type) (query :: Type) :: Type where
+    CellTypeList m q = ToList (AspectList q) (MatchListUnwrap (MapCellTypeMatch m (ExplodeQuery q)) 'Nothing)
+
+-- | apply list constructor n times where n is the length of the first argument
+type family ToList (ls :: [Type]) (a :: Type) :: Type where
+  ToList '[]       a = a
+  ToList (x ': xs) a = [ToList xs a]
+
+-- list query
+
+type family ExplodeQuery (aspects :: Type) :: k where
+    ExplodeQuery as = CombineAspects (ExplodeCube (AspectList as))
+
+type family MatchListUnwrap (match :: [Match Type]) (found :: Maybe Type) :: Type where
+    MatchListUnwrap ('NoMatch ': ms)   found     = MatchListUnwrap ms found
+    MatchListUnwrap ('Matched a ': ms) 'Nothing  = MatchListUnwrap ms ('Just a)
+    MatchListUnwrap ('Matched a ': ms) ('Just a) = MatchListUnwrap ms ('Just a)
+    MatchListUnwrap ('Matched a ': ms) ('Just b) = QueryTypeMismatch a b
+    MatchListUnwrap '[]                ('Just a) = a
+    MatchListUnwrap '[]                'Nothing  = QueryNoMatch
+    MatchListUnwrap ('MatchMalformedModel ': _) _ = MalformedModel
+
+type family MapCellTypeMatch (model :: Type) (queries :: [[Type]]) :: [Match Type] where
+    MapCellTypeMatch m (as ': ass) = CellTypeMatch m as ': MapCellTypeMatch m ass
+    MapCellTypeMatch _ '[]         = '[]
+
+-- single query
 
 type family MatchUnwrap (a :: Match Type) :: Type where
     MatchUnwrap ('Matched a)         = a
     MatchUnwrap 'NoMatch             = QueryNoMatch
     MatchUnwrap 'MatchMalformedModel = MalformedModel
 
-type family CellTypeMatch (model :: Type) (query :: Type) :: Match Type where
-    CellTypeMatch cs q = FindOne (MapCellTypeMatch q (MapExplodeCube (CubeList cs))) 'Nothing
+type family CellTypeMatch (model :: Type) (aspects :: [Type]) :: Match Type where
+    CellTypeMatch cs as = FindOne (MapMatch as (MapExplodeCube (CubeList cs))) 'Nothing
 
-type family MapCellTypeMatch (query :: Type) (cubes :: [Type]) :: [Maybe Type] where
-    MapCellTypeMatch q ((v $|$ as) ': cs) =
-      ( IfThenElse (Null (Difference as (AspectList q)))
+type family MapMatch (query :: [Type]) (cubes :: [Type]) :: [Maybe Type] where
+    MapMatch q ((v $|$ as) ': cs) =
+      ( IfThenElse (SameLists as q)
                    ('Just v) 'Nothing
-      ) ': MapCellTypeMatch q cs
-    MapCellTypeMatch _ '[]       = '[]
+      ) ': MapMatch q cs
+    MapMatch _ '[]       = '[]
 
 type family FindOne (ls :: [Maybe Type]) (found :: Maybe Type) :: Match Type where
     FindOne '[]              'Nothing  = 'NoMatch
@@ -112,17 +137,19 @@ type family FindOne (ls :: [Maybe Type]) (found :: Maybe Type) :: Match Type whe
     FindOne ('Just a  ': _)  ('Just b) = 'MatchMalformedModel
     FindOne ('Nothing ': xs) found     = FindOne xs found
 
--- explode cube
+-- explode model
 
 type family MapExplodeCube (cubes :: [Type]) :: [Type] where
     MapExplodeCube ((v $|$ as) ': cs) =
-      Append (MapToCube v (CombineCube (ExplodeCube (AspectList as))))
+      Append (MapToCube v (CombineAspects (ExplodeCube (AspectList as))))
              (MapExplodeCube cs)
     MapExplodeCube '[] = '[]
 
 type family MapToCube (value :: Type) (aspects :: [[Type]]) :: [Type] where
     MapToCube v (as ': ass) = (v $|$ as) ': MapToCube v ass
     MapToCube _ '[]         = '[]
+
+-- explode cube
 
 type family ExplodeCube (aspects :: [Type]) :: [[Type]] where
     ExplodeCube (a ': as) = ExplodeAspects a ': ExplodeCube as
@@ -134,12 +161,12 @@ type family ExplodeAspects (aspect :: Type) :: [Type] where
 
 -- combine cube
 
-type family CombineCube (aspects :: [[Type]]) :: [[Type]] where
-    CombineCube (as ': ass) = MapExplode as (CombineCube ass)
-    CombineCube '[]         = '[ '[] ]
+type family CombineAspects (aspects :: [[Type]]) :: [[Type]] where
+    CombineAspects (as ': ass) = MapExplode as (CombineAspects ass)
+    CombineAspects '[]         = '[ '[] ]
 
 type family MapExplode (aspects :: [Type]) (ass :: [[Type]]) :: [[Type]] where
-    MapExplode xs (y ': ys) = AppendList (Explode xs y) (MapExplode xs ys)
+    MapExplode xs (y ': ys) = Append (Explode xs y) (MapExplode xs ys)
     MapExplode xs '[]       = '[]
 
 type family Explode (xs :: [Type]) (ys :: [Type]) :: [[Type]] where
@@ -156,13 +183,9 @@ type family CubeList aspects :: [Type] where
     CubeList (x &&| xs)  = x ': CubeList xs
     CubeList Nil         = '[]
 
-type family Append (xs :: [Type]) (ys :: [Type]) :: [Type] where
+type family Append (xs :: [k]) (ys :: [k]) :: [k] where
     Append '[] ys = ys
     Append (x ': xs) ys = x ': Append xs ys
-
-type family AppendList (xs :: [[Type]]) (ys :: [[Type]]) :: [[Type]] where
-    AppendList '[] ys = ys
-    AppendList (x ': xs) ys = x ': AppendList xs ys
 
 type family Null ls :: Bool where
     Null '[] = 'True
@@ -172,27 +195,44 @@ type family IfThenElse (cond :: Bool) a b where
     IfThenElse 'True  x y = x
     IfThenElse 'False x y = y
 
--- | given a database model and a list query, return the query result type
--- type family   CellTypeList :: Type -> Type -> Type
--- type instance CellTypeList (v $|$ a) q = Map (CellTypeSingle (v $|$ a)) (RolloutQuery q)
-
-type family RolloutQuery aspect :: [Type] where
-    RolloutQuery (Aspect d (v ': vs)) = Aspect d v : RolloutQuery (Aspect d vs)
-    RolloutQuery (Aspect _ '[])       = '[]
-
--- Query
-
-type Any = '[]
+type family SameLists (xs :: [k]) (ys :: [k]) :: Bool where
+    SameLists (x ': xs) ys = IfThenElse (Find x ys) (SameLists xs (Remove x ys)) 'False
+    SameLists '[]      '[] = 'True
+    SameLists '[]      _   = 'False
 
 -- interface
 
-save' :: MonadIO m => Proxy model -> Proxy q -> CellTypeSingle model q -> m ()
-save' = undefined
+type SimpleModel = Integer $|$ Aspect "foo" '["bor"] |$ Aspect "egon" '["hugo"] |$ Nil
+               &&| Double  $|$ Aspect "egon" '["balders", "bolder", "belder"]
+                            |$ Aspect "franz" '["frei", "frey"]
+                            |$ Nil
+               &&| String  $|$ Aspect "egon" '["balders"] |$ Aspect "franz" '["freu"] |$ Nil
+               &&| Nil
+
+save' :: (MonadIO m, GetAspectsSingle q) => Proxy model -> Proxy q -> CellTypeList model q -> m ()
+save' Proxy query _ = liftIO . print $ getAspectsSingle query
+
+-- get aspects
+
+class GetAspectsSingle a where
+  getAspectsSingle :: Proxy a -> [(Dimension, DimValue)]
+
+instance (KnownSymbol d, KnownSymbol v, GetAspectsSingle as)
+      => GetAspectsSingle (Aspect d v |$ as) where
+  getAspectsSingle Proxy = (symbolText (Proxy :: Proxy d),
+                            symbolText (Proxy :: Proxy v))
+                             : (getAspectsSingle (Proxy :: Proxy as))
+
+instance GetAspectsSingle Nil where
+  getAspectsSingle Proxy = []
 
 test :: IO ()
 test = save' (Proxy :: Proxy SimpleModel)
-             (Proxy :: Proxy (Aspect "foo" "baz" |$ Aspect "egon" "balders" |$ Nil))
-             3.3
+             (Proxy :: Proxy (Aspect "egon" '["balders", "bolder"]
+                           |$ Aspect "franz" '["frei"]
+                           |$ Nil))
+             ([[3 :: Double]])
+
 -- cellstore mongodb backend
 
 type DbHost = Text
@@ -283,9 +323,9 @@ instance (KnownSymbol d, KnownSymbol v, Dimensions ds) => Dimensions ( '(d, v) '
   dimensions _ =
       (symbolText (Proxy :: Proxy d),
        symbolText (Proxy :: Proxy v)) : dimensions (Proxy :: Proxy ds)
-    where
-      symbolText :: KnownSymbol a => Proxy a -> Text
-      symbolText = Text.pack . symbolVal
+
+symbolText :: KnownSymbol a => Proxy a -> Text
+symbolText = Text.pack . symbolVal
 
 -- cellstore types
 
