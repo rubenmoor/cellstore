@@ -30,25 +30,6 @@ import           TypeFunctions
 import           Types
 
 
--- there is no query to get cells that have different aspects,
---   i.e. queries run along dimensional values for a given set of dimensions
--- a data point model with cells that differ by the absence of one aspect
---   is discouraged, though it shouldn't lead to problems
--- redundant definition of a data type (e.g. twice the same data type
---    with same aspects but other
---    dimensional values) is nonsensical and should yield a compile error,
---    ideally
--- the data point null (no aspects) currently cannot be used
--- list query: horizontal query results in list
---             vertical queries result in tuples of (Maybe a)
--- singleton query: always result in (Maybe a)
-type SimpleModel = Integer $|$ Aspect "foo" '["bor"] |$ Aspect "egon" '["hugo"] |$ Nil
-               &&| Double  $|$ Aspect "egon" '["balders", "bolder", "belder"]
-                            |$ Aspect "franz" '["frei", "frey"]
-                            |$ Nil
-               &&| String  $|$ Aspect "egon" '["balders"] |$ Aspect "franz" '["freu"] |$ Nil
-               &&| Nil
-
 -- interface
 
 save' :: (MonadIO m, GetAspectsSingle q) => Proxy model -> Proxy q -> CellTypeSingle model q -> m ()
@@ -87,6 +68,25 @@ instance GetAspectsList (a |$ as) where
 instance GetAspectsList Nil where
   type GetAspectsListType Nil = Void
   getAspectsList Proxy _ = []
+
+-- there is no query to get cells that have different aspects,
+--   i.e. queries run along dimensional values for a given set of dimensions
+-- a data point model with cells that differ by the absence of one aspect
+--   is discouraged, though it shouldn't lead to problems
+-- redundant definition of a data type (e.g. twice the same data type
+--    with same aspects but other
+--    dimensional values) is nonsensical and should yield a compile error,
+--    ideally
+-- the data point null (no aspects) currently cannot be used
+-- list query: horizontal query results in list
+--             vertical queries result in tuples of (Maybe a)
+-- singleton query: always result in (Maybe a)
+type SimpleModel = Integer $|$ Aspect "foo" '["bor"] |$ Aspect "egon" '["hugo"] |$ Nil
+               &&| Double  $|$ Aspect "egon" '["balders", "bolder", "belder"]
+                            |$ Aspect "franz" '["frei", "frey"]
+                            |$ Nil
+               &&| String  $|$ Aspect "egon" '["balders"] |$ Aspect "franz" '["freu"] |$ Nil
+               &&| Nil
 
 
 test :: IO ()
