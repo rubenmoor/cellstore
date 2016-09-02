@@ -32,8 +32,8 @@ Queries for objects in the database are types that are constructed by
 specifying a datapoint.
 
 ``` haskell
-type AQuery = Aspect |$ "Category" "Monetary"
-                     |$ "Currency" "EUR"
+type AQuery = Aspect "Category" "Monetary"
+           |$ Aspect "Currency" "EUR"
 ```
 
 The compiler can infer the type of the query result given a model
@@ -44,16 +44,16 @@ in lists as result type ...
 
 
 ``` haskell
-type AListQuery = Aspect |$ "Category" '["Monetary"]
-                         |$ "Currency" '["EUR", "USD", "ZWL"]
+type AListQuery = Aspect "Category" '["Monetary"]
+               |$ Aspect "Currency" '["EUR", "USD", "ZWL"]
 ```
 
 Or tuples (`(Double, Maybe Integer)` in the example,
 no idea how implement that, yet).
 
 ``` haskell
-type ATupleQuery = Aspect |$ "Category" '["Monetary", "Rank"]
-                          |$ "Currency" '["EUR"]
+type ATupleQuery = Aspect "Category" '["Monetary", "Rank"]
+                |$ Aspect "Currency" '["EUR"]
 ```
 
 This is work-in-progress.
