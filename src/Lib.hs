@@ -1,6 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs            #-}
-{-# LANGUAGE RecordWildCards  #-}
 {-# LANGUAGE TypeFamilies     #-}
 {-# LANGUAGE TypeOperators     #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -9,12 +8,15 @@
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE TypeInType #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# OPTIONS_GHC -fno-warn-unticked-promoted-constructors #-}
+
 
 module Lib where
 
-import           GHC.TypeLits (KnownSymbol, symbolVal)
+import           GHC.TypeLits (KnownSymbol, symbolVal, Symbol)
 import           Data.Kind (Type)
 import           Data.Void (Void)
 
@@ -37,6 +39,30 @@ save' Proxy query _ = liftIO . print $ getAspectsSingle query
 
 -- get aspects
 
+symbolText :: KnownSymbol a => Proxy a -> Text
+symbolText = Text.pack . symbolVal
+
+class Extractable (a :: k) where
+  type Extract (k :: Type) :: Type
+  extract :: Proxy (a :: k) -> Extract k
+
+instance KnownSymbol a => Extractable (a :: Symbol) where
+  type Extract Symbol = Text
+  extract = symbolText
+
+instance (KnownSymbol a, KnownSymbol b) => Extractable ('(a, b) :: (Symbol, Symbol)) where
+  type Extract (Symbol, Symbol) = (Text, Text)
+  extract _ = (symbolText (Proxy :: Proxy a),
+               symbolText (Proxy :: Proxy b))
+
+instance Extractable ('[] :: [a]) where
+  type Extract [a] = [Extract a]
+  extract _ = []
+
+instance (Extractable x, Extractable xs) => Extractable (x ': xs) where
+  type Extract [a] = [Extract a]
+  extract _ = extract (Proxy :: Proxy x) : extract (Proxy :: Proxy xs)
+
 -- single
 
 class GetAspectsSingle a where
@@ -46,10 +72,7 @@ instance (KnownSymbol d, KnownSymbol v, GetAspectsSingle as)
       => GetAspectsSingle (Aspect d v |$ as) where
   getAspectsSingle _ = (symbolText (Proxy :: Proxy d),
                         symbolText (Proxy :: Proxy v))
-                         : (getAspectsSingle (Proxy :: Proxy as))
-    where
-      symbolText :: KnownSymbol a => Proxy a -> Text
-      symbolText = Text.pack . symbolVal
+                         : getAspectsSingle (Proxy :: Proxy as)
 
 instance GetAspectsSingle Nil where
   getAspectsSingle _ = []
